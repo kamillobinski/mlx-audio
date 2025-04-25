@@ -191,7 +191,15 @@ python -m mlx_vlm.convert --hf-path <local_dir> --mlx-path <mlx_dir>
             class_predicate=get_class_predicate,
         )
 
-    model.load_weights(list(weights.items()), strict=strict)
+    # check model.load_weights signature
+    import inspect
+    load_weights_sig = inspect.signature(model.load_weights)
+
+    # only pass strict if its accepted
+    if "strict" in load_weights_sig.parameters:
+        model.load_weights(list(weights.items()), strict=strict)
+    else:
+        model.load_weights(list(weights.items()))
 
     if not lazy:
         mx.eval(model.parameters())
