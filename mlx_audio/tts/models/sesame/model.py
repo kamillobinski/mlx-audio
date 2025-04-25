@@ -174,7 +174,7 @@ class SesameModel(nn.Module):
         tokens_mask: mx.array,
         input_pos: mx.array,
         sampler: Callable[..., mx.array],
-    ) -> mx.array:
+    ) -> Tuple[mx.array, List[mx.array]]:
         assert self.caches_are_enabled(), "backbone caches are not enabled"
 
         curr_backbone_mask = index_causal_mask(self._backbone_causal_mask, input_pos)
@@ -188,6 +188,7 @@ class SesameModel(nn.Module):
         c0_sample = mx.expand_dims(sampler(c0_logits), axis=-1)
         c0_embed = self._embed_audio(0, c0_sample)
 
+        logits_list = [c0_logits]  # logits list for entropy debug
         curr_h = mx.concat([mx.expand_dims(last_h, 1), c0_embed], axis=1)
         curr_sample = c0_sample
         curr_pos = mx.arange(curr_h.shape[1], dtype=mx.int32)
@@ -214,7 +215,9 @@ class SesameModel(nn.Module):
             curr_sample = mx.concat([curr_sample, ci_sample], axis=1)
             curr_pos = curr_pos[:, -1:] + 1
 
-        return curr_sample
+            logits_list.append(ci_logits)  # append cookbook logits
+
+        return curr_sample, logits_list
 
     def _embed_audio(self, codebook: int, tokens: mx.array) -> mx.array:
         return self.audio_embeddings(tokens + codebook * self.args.audio_vocab_size)
@@ -398,14 +401,35 @@ class Model(nn.Module):
                 f"Inputs too long, must be below max_seq_len - max_audio_frames: {max_seq_len}"
             )
 
+        entropy_trace = []
+
         for _ in tqdm(range(max_audio_frames)):
-            sample = self.model.generate_frame(
+            sample, logits_list = self.model.generate_frame(
                 curr_tokens, curr_tokens_mask, curr_pos, sampler
             )
             if mx.all(sample == 0):
                 break  # eos
 
             samples.append(sample)
+
+            # entropy calc per codebook
+            codebook_entropies = []
+            for logits in logits_list:
+                mx.eval(logits)
+                logits = logits.astype(mx.float32)
+
+                logits_max = mx.max(logits, axis=-1, keepdims=True)
+                probs = mx.exp(logits - logits_max)
+                probs /= mx.sum(probs, axis=-1, keepdims=True)
+
+                # entropy: -sum(p * log(p))
+                log_p = mx.log(probs + 1e-12)  # avoid log(0)
+                entropies = -mx.sum(probs * log_p, axis=-1)
+
+                ent = float(mx.mean(entropies).item())
+                codebook_entropies.append(ent)
+
+            entropy_trace.append(codebook_entropies)
 
             curr_tokens = mx.expand_dims(
                 mx.concat([sample, mx.zeros((1, 1)).astype(mx.int32)], axis=1), axis=1
@@ -485,5 +509,6 @@ class Model(nn.Module):
                 },
                 processing_time_seconds=segment_time,
                 peak_memory_usage=mx.metal.get_peak_memory() / 1e9,
+                entropy_trace=entropy_trace,
             )
         ]

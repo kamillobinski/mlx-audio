@@ -1,5 +1,6 @@
 import inspect
 from dataclasses import dataclass
+from typing import Optional, List
 
 import mlx.core as mx
 import numpy as np
@@ -82,3 +83,4 @@ class GenerationResult:
     audio_samples: dict
     processing_time_seconds: float
     peak_memory_usage: float
+    entropy_trace: Optional[List[List[float]]] = None
